@@ -53,23 +53,19 @@ def plot_result(result_dict, show_windows=True, savefile=None):
 
     index = portfolio.index
 
-    # maxdrawdown
+    # maxdrawdown & duration, 包含截止到新的净值追平开始最大回撤开始时候时间点
     portfolio_value = portfolio.unit_net_value * portfolio.units
     xs = portfolio_value.values
     rt = portfolio.unit_net_value.values
-    max_dd_end = np.argmax(np.maximum.accumulate(xs) / xs)
+    xs_max_accum = np.maximum.accumulate(xs)
+    max_dd_end = np.argmax(xs_max_accum / xs)
     if max_dd_end == 0:
         max_dd_end = len(xs) - 1
+    tmp = (xs - xs_max_accum)[max_dd_end:]
     max_dd_start = np.argmax(xs[:max_dd_end]) if max_dd_end > 0 else 0
+    max_ddd_start_day = max_dd_start
+    max_ddd_end_day = len(xs) - 1 if tmp.max() < 0 else np.argmax(tmp) + max_dd_end
 
-    # maxdrawdown duration
-    al_cum = np.maximum.accumulate(xs)
-    a = np.unique(al_cum, return_counts=True)
-    start_idx = np.argmax(a[1])
-    m = a[0][start_idx]
-    al_cum_array = np.where(al_cum == m)
-    max_ddd_start_day = al_cum_array[0][0]
-    max_ddd_end_day = al_cum_array[0][-1]
 
     max_dd_info = "MaxDD  {}~{}, {} days".format(index[max_dd_start], index[max_dd_end],
                                                  (index[max_dd_end] - index[max_dd_start]).days)
@@ -149,15 +145,16 @@ def plot_result(result_dict, show_windows=True, savefile=None):
     ax.grid(b=True, which='major', linewidth=1)
 
     # plot two lines
-    ax.plot(portfolio["unit_net_value"], label=_(u"strategy"), alpha=1, linewidth=2, color=red)
+    ax.plot(portfolio["unit_net_value"] - 1.0, label=_(u"strategy"), alpha=1, linewidth=2, color=red)
     if benchmark_portfolio is not None:
-        ax.plot(benchmark_portfolio["unit_net_value"], label=_(u"benchmark"), alpha=1, linewidth=2, color=blue)
+        ax.plot(benchmark_portfolio["unit_net_value"] - 1.0, label=_(u"benchmark"), alpha=1, linewidth=2, color=blue)
 
     # plot MaxDD/MaxDDD
-    ax.plot([index[max_dd_end], index[max_dd_start]], [rt[max_dd_end], rt[max_dd_start]],
+    ax.plot([index[max_dd_end], index[max_dd_start]], [rt[max_dd_end] - 1.0, rt[max_dd_start] - 1.0],
             'v', color='Green', markersize=8, alpha=.7, label=_(u"MaxDrawdown"))
     ax.plot([index[max_ddd_start_day], index[max_ddd_end_day]],
-            [rt[max_ddd_start_day], rt[max_ddd_end_day]], 'D', color='Blue', markersize=8, alpha=.7, label=_(u"MaxDDD"))
+            [rt[max_ddd_start_day] - 1.0, rt[max_ddd_end_day] - 1.0], 'D', color='Blue', markersize=8, alpha=.7,
+            label=_(u"MaxDDD"))
 
     # place legend
     leg = plt.legend(loc="best")
@@ -178,11 +175,11 @@ def plot_result(result_dict, show_windows=True, savefile=None):
         leg = plt.legend(loc="best")
         leg.get_frame().set_alpha(0.5)
 
-    if show_windows:
-        plt.show()
-
     if savefile:
         fnmame = savefile
         if os.path.isdir(savefile):
             fnmame = os.path.join(savefile, "{}.png".format(summary["strategy_name"]))
         plt.savefig(fnmame, bbox_inches='tight')
+
+    if show_windows:
+        plt.show()

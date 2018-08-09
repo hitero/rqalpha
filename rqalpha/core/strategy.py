@@ -14,14 +14,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..events import EVENT, Event
-from ..utils import run_when_strategy_not_hold
-from ..utils.logger import user_system_log
-from ..utils.i18n import gettext as _
-from ..utils.exception import ModifyExceptionFromType
-from ..execution_context import ExecutionContext
-from ..const import EXECUTION_PHASE, EXC_TYPE
-from ..environment import Environment
+from rqalpha.events import EVENT, Event
+from rqalpha.utils import run_when_strategy_not_hold
+from rqalpha.utils.logger import user_system_log
+from rqalpha.utils.i18n import gettext as _
+from rqalpha.utils.exception import ModifyExceptionFromType
+from rqalpha.execution_context import ExecutionContext
+from rqalpha.const import EXECUTION_PHASE, EXC_TYPE
+from rqalpha.environment import Environment
 
 
 class Strategy(object):
@@ -56,6 +56,8 @@ class Strategy(object):
         if self._before_night_trading is not None:
             user_system_log.warn(_(u"[deprecated] before_night_trading is no longer used. use before_trading instead."))
 
+        self._force_run_before_trading = Environment.get_instance().config.extra.force_run_init_when_pt_resume
+
     @property
     def user_context(self):
         return self._user_context
@@ -72,23 +74,30 @@ class Strategy(object):
 
     @run_when_strategy_not_hold
     def before_trading(self, event):
+        self._force_run_before_trading = False
         with ExecutionContext(EXECUTION_PHASE.BEFORE_TRADING):
             with ModifyExceptionFromType(EXC_TYPE.USER_EXC):
                 self._before_trading(self._user_context)
 
     @run_when_strategy_not_hold
     def handle_bar(self, event):
-        bar_dict = event.bar_dict
-        with ExecutionContext(EXECUTION_PHASE.ON_BAR):
-            with ModifyExceptionFromType(EXC_TYPE.USER_EXC):
-                self._handle_bar(self._user_context, bar_dict)
+        if self._force_run_before_trading:
+            self.before_trading(event)
+        else:
+            bar_dict = event.bar_dict
+            with ExecutionContext(EXECUTION_PHASE.ON_BAR):
+                with ModifyExceptionFromType(EXC_TYPE.USER_EXC):
+                    self._handle_bar(self._user_context, bar_dict)
 
     @run_when_strategy_not_hold
     def handle_tick(self, event):
-        tick = event.tick
-        with ExecutionContext(EXECUTION_PHASE.ON_TICK):
-            with ModifyExceptionFromType(EXC_TYPE.USER_EXC):
-                self._handle_tick(self._user_context, tick)
+        if self._force_run_before_trading:
+            self.before_trading(event)
+        else:
+            tick = event.tick
+            with ExecutionContext(EXECUTION_PHASE.ON_TICK):
+                with ModifyExceptionFromType(EXC_TYPE.USER_EXC):
+                    self._handle_tick(self._user_context, tick)
 
     @run_when_strategy_not_hold
     def after_trading(self, event):

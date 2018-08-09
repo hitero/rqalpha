@@ -18,13 +18,13 @@ import six
 import numpy as np
 import pandas as pd
 
-from . import risk_free_helper
-from .instrument_mixin import InstrumentMixin
-from .trading_dates_mixin import TradingDatesMixin
-from ..model.bar import BarObject
-from ..model.snapshot import SnapshotObject
-from ..utils.py2 import lru_cache
-from ..utils.datetime_func import convert_int_to_datetime, convert_date_to_int
+from rqalpha.data import risk_free_helper
+from rqalpha.data.instrument_mixin import InstrumentMixin
+from rqalpha.data.trading_dates_mixin import TradingDatesMixin
+from rqalpha.model.bar import BarObject
+from rqalpha.model.tick import TickObject
+from rqalpha.utils.py2 import lru_cache
+from rqalpha.utils.datetime_func import convert_int_to_datetime, convert_date_to_int
 
 
 class DataProxy(InstrumentMixin, TradingDatesMixin):
@@ -59,13 +59,18 @@ class DataProxy(InstrumentMixin, TradingDatesMixin):
         return 0 if np.isnan(rate) else rate
 
     def get_dividend(self, order_book_id):
+        if self.instruments(order_book_id).type == 'PublicFund':
+            return self._data_source.get_dividend(order_book_id, public_fund=True)
         return self._data_source.get_dividend(order_book_id)
 
     def get_split(self, order_book_id):
         return self._data_source.get_split(order_book_id)
 
     def get_dividend_by_book_date(self, order_book_id, date):
-        table = self._data_source.get_dividend(order_book_id)
+        if self.instruments(order_book_id).type == 'PublicFund':
+            table = self._data_source.get_dividend(order_book_id, public_fund=True)
+        else:
+            table = self._data_source.get_dividend(order_book_id)
         if table is None or len(table) == 0:
             return
 
@@ -92,9 +97,10 @@ class DataProxy(InstrumentMixin, TradingDatesMixin):
     @lru_cache(10240)
     def _get_prev_close(self, order_book_id, dt):
         instrument = self.instruments(order_book_id)
-        bar = self._data_source.history_bars(instrument, 2, '1d', 'close', dt,
-                                             skip_suspended=False, include_now=False)
-        if bar is None or len(bar) < 2:
+        prev_trading_date = self.get_previous_trading_date(dt)
+        bar = self._data_source.history_bars(instrument, 1, '1d', 'close', prev_trading_date,
+                                             skip_suspended=False, include_now=False, adjust_orig=dt)
+        if bar is None or len(bar) < 1:
             return np.nan
         return bar[0]
 
@@ -105,7 +111,7 @@ class DataProxy(InstrumentMixin, TradingDatesMixin):
     def _get_prev_settlement(self, instrument, dt):
         prev_trading_date = self.get_previous_trading_date(dt)
         bar = self._data_source.history_bars(instrument, 1, '1d', 'settlement', prev_trading_date,
-                                             skip_suspended=False)
+                                             skip_suspended=False, adjust_orig=dt)
         if bar is None or len(bar) == 0:
             return np.nan
         return bar[0]
@@ -130,7 +136,7 @@ class DataProxy(InstrumentMixin, TradingDatesMixin):
 
     def history(self, order_book_id, bar_count, frequency, field, dt):
         data = self.history_bars(order_book_id, bar_count, frequency,
-                                 ['datetime', field], dt, skip_suspended=False)
+                                 ['datetime', field], dt, skip_suspended=False, adjust_orig=dt)
         if data is None:
             return None
         return pd.Series(data[field], index=[convert_int_to_datetime(t) for t in data['datetime']])
@@ -149,16 +155,33 @@ class DataProxy(InstrumentMixin, TradingDatesMixin):
                                               skip_suspended=skip_suspended, include_now=include_now,
                                               adjust_type=adjust_type, adjust_orig=adjust_orig)
 
+    def history_ticks(self, order_book_id, count, dt):
+        instrument = self.instruments(order_book_id)
+        return self._data_source.history_ticks(instrument, count, dt)
+
     def current_snapshot(self, order_book_id, frequency, dt):
+
+        def tick_fields_for(ins):
+            _STOCK_FIELD_NAMES = [
+                'datetime', 'open', 'high', 'low', 'last', 'volume', 'total_turnover', 'prev_close',
+                'limit_up', 'limit_down'
+            ]
+            _FUTURE_FIELD_NAMES = _STOCK_FIELD_NAMES + ['open_interest', 'prev_settlement']
+
+            if ins.type == 'Future':
+                return _STOCK_FIELD_NAMES
+            else:
+                return _FUTURE_FIELD_NAMES
+
         instrument = self.instruments(order_book_id)
         if frequency == '1d':
             bar = self._data_source.get_bar(instrument, dt, '1d')
             if not bar:
-                return SnapshotObject(instrument, None, dt)
-            d = {k: bar[k] for k in SnapshotObject.fields_for_(instrument) if k in bar.dtype.names}
+                return None
+            d = {k: bar[k] for k in tick_fields_for(instrument) if k in bar.dtype.names}
             d['last'] = bar['close']
             d['prev_close'] = self._get_prev_close(order_book_id, dt)
-            return SnapshotObject(instrument, d)
+            return TickObject(instrument, d)
 
         return self._data_source.current_snapshot(instrument, frequency, dt)
 
@@ -167,7 +190,12 @@ class DataProxy(InstrumentMixin, TradingDatesMixin):
 
     def get_margin_info(self, order_book_id):
         instrument = self.instruments(order_book_id)
-        return self._data_source.get_margin_info(instrument)
+        margin_info = self._data_source.get_margin_info(instrument)
+
+        if "long_margin_ratio" in margin_info and np.isnan(margin_info["long_margin_ratio"]):
+            raise RuntimeError("Long margin ratio of {} is not supposed to be nan".format(order_book_id))
+
+        return margin_info
 
     def get_commission_info(self, order_book_id):
         instrument = self.instruments(order_book_id)
@@ -193,3 +221,25 @@ class DataProxy(InstrumentMixin, TradingDatesMixin):
 
         trading_dates = self.get_n_trading_dates_until(dt, count)
         return self._data_source.is_st_stock(order_book_id, trading_dates)
+
+    def non_subscribable(self, order_book_id, dt, count=1):
+        if count == 1:
+            return self._data_source.non_subscribable(order_book_id, [dt])[0]
+
+        trading_dates = self.get_n_trading_dates_until(dt, count)
+        return self._data_source.non_subscribable(order_book_id, trading_dates)
+
+    def non_redeemable(self, order_book_id, dt, count=1):
+        if count == 1:
+            return self._data_source.non_redeemable(order_book_id, [dt])[0]
+
+        trading_dates = self.get_n_trading_dates_until(dt, count)
+        return self._data_source.non_redeemable(order_book_id, trading_dates)
+
+    def public_fund_commission(self, order_book_id, buy):
+        instrument = self.instruments(order_book_id)
+        return self._data_source.public_fund_commission(instrument, buy)
+
+    def get_tick_size(self, order_book_id):
+        instrument = self.instruments(order_book_id)
+        return self._data_source.get_tick_size(instrument)

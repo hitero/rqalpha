@@ -11,8 +11,8 @@ RQAlpha
 ..  image:: https://coveralls.io/repos/github/ricequant/rqalpha/badge.svg?branch=master
     :target: https://coveralls.io/github/ricequant/rqalpha?branch=master
 
-..  image:: https://readthedocs.org/projects/rqalpha/badge/?version=stable
-    :target: http://rqalpha.readthedocs.io/zh_CN/stable/?badge=stable
+..  image:: https://readthedocs.org/projects/rqalpha/badge/?version=latest
+    :target: http://rqalpha.readthedocs.io/zh_CN/latest/?badge=latest
     :alt: Documentation Status
 
 ..  image:: https://img.shields.io/pypi/v/rqalpha.svg
@@ -92,7 +92,6 @@ Mod名                      说明
 `sys_risk`_               【系统模块】对订单进行事前风控校验
 `sys_simulation`_         【系统模块】支持回测、撮合、滑点控制等
 `sys_stock_realtime`_     【系统模块】Demo 模块，用于展示如何接入自有行情进行回测/模拟/实盘
-`vnpy`_                   【第三方模块】通过 VNPY 对接期货实盘行情和实盘交易
 `sentry`_                 【第三方模块】集成 sentry 的扩展，实现错误日志全自动采集、处理
 `tushare`_                【第三方模块】Demo Mod，用于展示如何通过tushare 获取实时Bar数据并组装以供RQAlpha使用
 `shipane`_                【第三方模块】集成实盘易SDK，用于对接股票实盘跟单交易
@@ -100,22 +99,19 @@ Mod名                      说明
 
 如果您基于 RQAlpha 进行了 Mod 扩展，欢迎告知我们，在审核通过后，会在 Mod 列表中添加您的 Mod 信息和链接。
 
-机构版
-============================
+`金融数据RQData`_
+================
 
-..  image:: https://raw.githubusercontent.com/ricequant/rq-resource/master/rqalpha/rqalpha_plus.png
+米筐自研时间序列数据模块RQData，采用双源多点备份，自动化清洗等手段保证数据的准确性。确保用户投研的脚步足够稳健。用户只需在策略中 :code:`import rqdatac`,即可通过API本地调用以下数据：
 
-目前 RQAlpha 开源版仅开放了日级别的历史数据和日回测功能，如果您是机构用户，需要做算法交易亦或是量化研究，都可以联系我们的机构端产品销售获得机构端产品功能支持。「销售电话」：0755-33967716 「QQ」：4848371
+*   十年全品种（商品、国债、股指）、多频率（日、分钟、Tick）期货历史数据；
+*   2005年以来股票历史数据（日、分钟）；
+*   上市公式财务数据、指数行业板块构成数据等；
+*   公募基金净值、持仓、行业配置等数据；
+*   停牌、分红等衍生数据；
+*   无缝对接RQAlpha;
 
-机构端产品功能：
-
-*   可以本地部署，使用pycharm、anaconda等工具做本地策略研发、模拟以及实盘交易，效率大大加强，本地管理自己的策略提高保密性
-*   极速调取经过清洗处理的历史数据接口服务，包括了：400多项指标的财务数据，股票、期货、ETF、LOF、分级基金等等10年+的日和分钟、tick级别的历史数据以及每日更新，股票、期货的实时数据支持，指数以及构成，板块分类，股本、换手率、融资融券等，天猫等电商销量数据，公募基金数据，舆情、公告类
-*   股票、期货的实盘交易订单管理系统以及实盘下单支持，从回测到实盘交易的一条龙系统以及服务支持
-*   策略的管理以及实盘的收益、风险计算等
-*   交易数据的保存以及提取分析
-*   业绩分析和风险管理系统
-*   技术支持及定制化开发
+*目前RQData正在限额内测中，内测期用户可免费限流使用*， `点击链接免费开通`_ 。
 
 Feature Status
 ============================
@@ -186,6 +182,8 @@ Feature Status
 .. _Ricequant 社区: https://www.ricequant.com/community/category/all/
 .. _FAQ: http://rqalpha.readthedocs.io/zh_CN/latest/faq.html
 .. _索引: http://rqalpha.readthedocs.io/zh_CN/latest/genindex.html
+.. _RQPro: https://www.ricequant.com/rqpro_propaganda/?utm_source=github
+.. _专业级本地终端RQPro: https://www.ricequant.com/rqpro_propaganda/?utm_source=github
 
 .. _RQAlpha 介绍: http://rqalpha.readthedocs.io/zh_CN/latest/intro/overview.html
 .. _安装指南: http://rqalpha.readthedocs.io/zh_CN/latest/intro/install.html
@@ -214,3 +212,6 @@ Feature Status
 .. _sentry: https://github.com/ricequant/rqalpha-mod-sentry
 .. _tushare: https://github.com/ricequant/rqalpha-mod-tushare
 .. _shipane: https://github.com/wh1100717/rqalpha-mod-ShiPanE
+.. _金融数据RQData: https://www.ricequant.com/doc/rqdata-institutional
+.. _点击链接免费开通: https://ricequant.mikecrm.com/h7ZFJnT
+

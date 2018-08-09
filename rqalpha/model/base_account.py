@@ -16,12 +16,13 @@
 
 import six
 
-from ...utils.repr import property_repr
-from ...utils.i18n import gettext as _
-from ...utils.logger import user_system_log
+from rqalpha.interface import AbstractAccount
+from rqalpha.utils.repr import property_repr
+from rqalpha.utils.i18n import gettext as _
+from rqalpha.utils.logger import user_system_log
 
 
-class BaseAccount(object):
+class BaseAccount(AbstractAccount):
 
     __abandon_properties__ = [
         "portfolio_value",
@@ -31,13 +32,15 @@ class BaseAccount(object):
         "pnl"
     ]
 
+    AGGRESSIVE_UPDATE_LAST_PRICE = False
+
     __repr__ = property_repr
 
-    def __init__(self, total_cash, positions, backward_trade_set=set(), register_event=True):
+    def __init__(self, total_cash, positions, backward_trade_set=None, register_event=True):
         self._positions = positions
         self._frozen_cash = 0
         self._total_cash = total_cash
-        self._backward_trade_set = backward_trade_set
+        self._backward_trade_set = backward_trade_set if backward_trade_set is not None else set()
         self._transaction_cost = 0
         if register_event:
             self.register_event()

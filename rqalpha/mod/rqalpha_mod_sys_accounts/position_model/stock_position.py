@@ -14,11 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .base_position import BasePosition
-from ...const import ACCOUNT_TYPE, SIDE
-from ...environment import Environment
-from ...utils.i18n import gettext as _
-from ...utils.logger import user_system_log
+from rqalpha.model.base_position import BasePosition
+from rqalpha.const import DEFAULT_ACCOUNT_TYPE, SIDE
+from rqalpha.environment import Environment
+from rqalpha.utils.i18n import gettext as _
+from rqalpha.utils.logger import user_system_log
 
 
 class StockPosition(BasePosition):
@@ -30,6 +30,7 @@ class StockPosition(BasePosition):
         "sold_value",
         "average_cost"
     ]
+    stock_t1 = True
 
     def __init__(self, order_book_id):
         super(StockPosition, self).__init__(order_book_id)
@@ -38,6 +39,9 @@ class StockPosition(BasePosition):
         self._non_closable = 0     # 当天买入的不能卖出
         self._frozen = 0            # 冻结量
         self._transaction_cost = 0  # 交易费用
+
+    def __repr__(self):
+        return 'StockPosition({})'.format(self.__dict__)
 
     def get_state(self):
         return {
@@ -60,11 +64,17 @@ class StockPosition(BasePosition):
     def apply_trade(self, trade):
         self._transaction_cost += trade.transaction_cost
         if trade.side == SIDE.BUY:
-            self._avg_price = (self._avg_price * self._quantity + trade.last_quantity * trade.last_price) / (
-                self._quantity + trade.last_quantity)
+            # 对应卖空情况
+            if self._quantity < 0:
+                if trade.last_quantity <= -1 * self._quantity:
+                    self._avg_price = 0
+                else:
+                    self._avg_price = trade.last_price
+            else:
+                self._avg_price = (self._avg_price * self._quantity + trade.last_quantity * trade.last_price) / (
+                    self._quantity + trade.last_quantity)
             self._quantity += trade.last_quantity
-
-            if self._order_book_id not in {'510900.XSHG', '513030.XSHG', '513100.XSHG', '513500.XSHG'}:
+            if self.stock_t1 and self._order_book_id not in {'510900.XSHG', '513030.XSHG', '513100.XSHG', '513500.XSHG'}:
                 # 除了上述 T+0 基金，其他都是 T+1
                 self._non_closable += trade.last_quantity
         else:
@@ -82,7 +92,7 @@ class StockPosition(BasePosition):
 
     @property
     def type(self):
-        return ACCOUNT_TYPE.STOCK
+        return DEFAULT_ACCOUNT_TYPE.STOCK.name
 
     def split_(self, ratio):
         self._quantity *= ratio
@@ -142,13 +152,29 @@ class StockPosition(BasePosition):
     @property
     def value_percent(self):
         """
-        [float] 获得该持仓的实时市场价值在总投资组合价值中所占比例，取值范围[0, 1]
+        [float] 获得该持仓的实时市场价值在股票投资组合价值中所占比例，取值范围[0, 1]
         """
         accounts = Environment.get_instance().portfolio.accounts
-        if ACCOUNT_TYPE.STOCK not in accounts:
+        if DEFAULT_ACCOUNT_TYPE.STOCK.name not in accounts:
             return 0
-        total_value = accounts[ACCOUNT_TYPE.STOCK].total_value
+        total_value = accounts[DEFAULT_ACCOUNT_TYPE.STOCK.name].total_value
         return 0 if total_value == 0 else self.market_value / total_value
+
+    # -- Function
+    def is_de_listed(self):
+        """
+        判断合约是否过期
+        """
+        env = Environment.get_instance()
+        instrument = env.get_instrument(self._order_book_id)
+        current_date = env.trading_dt
+
+        if instrument.de_listed_date is not None:
+            if instrument.de_listed_date.date() > env.config.base.end_date:
+                return False
+            if current_date >= env.data_proxy.get_previous_trading_date(instrument.de_listed_date):
+                return True
+        return False
 
     # ------------------------------------ Abandon Property ------------------------------------
 

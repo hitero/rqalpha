@@ -16,12 +16,14 @@
 
 import six
 
-from .base_account import BaseAccount
-from ...environment import Environment
-from ...events import EVENT
-from ...const import ACCOUNT_TYPE, POSITION_EFFECT
-from ...utils.i18n import gettext as _
-from ...utils.logger import user_system_log
+from rqalpha.model.base_account import BaseAccount
+from rqalpha.environment import Environment
+from rqalpha.events import EVENT
+from rqalpha.const import DEFAULT_ACCOUNT_TYPE, POSITION_EFFECT, SIDE
+from rqalpha.utils.i18n import gettext as _
+from rqalpha.utils.logger import user_system_log
+
+from ..api.api_future import order
 
 
 def margin_of(order_book_id, quantity, price):
@@ -40,14 +42,19 @@ class FutureAccount(BaseAccount):
         "daily_realized_pnl"
     ]
 
+    forced_liquidation = True
+
     def register_event(self):
         event_bus = Environment.get_instance().event_bus
-        event_bus.prepend_listener(EVENT.SETTLEMENT, self._settlement)
-        event_bus.prepend_listener(EVENT.ORDER_PENDING_NEW, self._on_order_pending_new)
-        event_bus.prepend_listener(EVENT.ORDER_CREATION_REJECT, self._on_order_creation_reject)
-        event_bus.prepend_listener(EVENT.ORDER_CANCELLATION_PASS, self._on_order_unsolicited_update)
-        event_bus.prepend_listener(EVENT.ORDER_UNSOLICITED_UPDATE, self._on_order_unsolicited_update)
-        event_bus.prepend_listener(EVENT.TRADE, self._on_trade)
+        event_bus.add_listener(EVENT.TRADE, self._on_trade)
+        event_bus.add_listener(EVENT.ORDER_PENDING_NEW, self._on_order_pending_new)
+        event_bus.add_listener(EVENT.ORDER_CREATION_REJECT, self._on_order_unsolicited_update)
+        event_bus.add_listener(EVENT.ORDER_UNSOLICITED_UPDATE, self._on_order_unsolicited_update)
+        event_bus.add_listener(EVENT.ORDER_CANCELLATION_PASS, self._on_order_unsolicited_update)
+        event_bus.add_listener(EVENT.SETTLEMENT, self._settlement)
+        if self.AGGRESSIVE_UPDATE_LAST_PRICE:
+            event_bus.add_listener(EVENT.BAR, self._update_last_price)
+            event_bus.add_listener(EVENT.TICK, self._update_last_price)
 
     def fast_forward(self, orders, trades=list()):
         # 计算 Positions
@@ -58,12 +65,79 @@ class FutureAccount(BaseAccount):
         # 计算 Frozen Cash
         self._frozen_cash = sum(self._frozen_cash_of_order(order) for order in orders if order.is_active())
 
+    def order(self, order_book_id, quantity, style, target=False):
+        position = self.positions[order_book_id]
+        if target:
+            # For order_to
+            quantity = quantity - position.buy_quantity + position.sell_quantity
+        orders = []
+        if quantity > 0:
+            sell_old_quantity, sell_today_quantity = position.sell_old_quantity, position.sell_today_quantity
+            # 平昨仓
+            if sell_old_quantity > 0:
+                orders.append(order(
+                    order_book_id,
+                    min(quantity, sell_old_quantity),
+                    SIDE.BUY,
+                    POSITION_EFFECT.CLOSE,
+                    style
+                ))
+                quantity -= sell_old_quantity
+            if quantity <= 0:
+                return orders
+            # 平今仓
+            if sell_today_quantity > 0:
+                orders.append(order(
+                    order_book_id,
+                    min(quantity, sell_today_quantity),
+                    SIDE.BUY,
+                    POSITION_EFFECT.CLOSE_TODAY,
+                    style
+                ))
+                quantity -= sell_today_quantity
+            if quantity <= 0:
+                return orders
+            # 开多仓
+            orders.append(order(
+                order_book_id,
+                quantity,
+                SIDE.BUY,
+                POSITION_EFFECT.OPEN,
+                style
+            ))
+            return orders
+        else:
+            # 平昨仓
+            quantity *= -1
+            buy_old_quantity, buy_today_quantity = position.buy_old_quantity, position.buy_today_quantity
+            if buy_old_quantity > 0:
+                orders.append(
+                    order(order_book_id, min(quantity, buy_old_quantity), SIDE.SELL, POSITION_EFFECT.CLOSE, style))
+                quantity -= min(quantity, buy_old_quantity)
+            if quantity <= 0:
+                return orders
+            # 平今仓
+            if buy_today_quantity > 0:
+                orders.append(order(
+                    order_book_id,
+                    min(quantity, buy_today_quantity),
+                    SIDE.SELL,
+                    POSITION_EFFECT.CLOSE_TODAY,
+                    style
+                ))
+                quantity -= buy_today_quantity
+            if quantity <= 0:
+                return orders
+            # 开空仓
+            orders.append(order(order_book_id, quantity, SIDE.SELL, POSITION_EFFECT.OPEN, style))
+            return orders
+
     def get_state(self):
         return {
             'positions': {
                 order_book_id: position.get_state()
                 for order_book_id, position in six.iteritems(self._positions)
-                },
+            },
             'frozen_cash': self._frozen_cash,
             'total_cash': self._total_cash,
             'backward_trade_set': list(self._backward_trade_set),
@@ -72,17 +146,22 @@ class FutureAccount(BaseAccount):
 
     def set_state(self, state):
         self._frozen_cash = state['frozen_cash']
-        self._total_cash = state['total_cash']
         self._backward_trade_set = set(state['backward_trade_set'])
         self._transaction_cost = state['transaction_cost']
+
+        margin_changed = 0
         self._positions.clear()
         for order_book_id, v in six.iteritems(state['positions']):
             position = self._positions.get_or_create(order_book_id)
             position.set_state(v)
+            if 'margin_rate' in v and abs(v['margin_rate'] - position.margin_rate) > 1e-6:
+                margin_changed += position.margin * (v['margin_rate'] - position.margin_rate) / position.margin_rate
+
+        self._total_cash = state['total_cash'] + margin_changed
 
     @property
     def type(self):
-        return ACCOUNT_TYPE.FUTURE
+        return DEFAULT_ACCOUNT_TYPE.FUTURE.name
 
     @staticmethod
     def _frozen_cash_of_order(order):
@@ -147,8 +226,8 @@ class FutureAccount(BaseAccount):
         return sum(position.realized_pnl for position in six.itervalues(self._positions))
 
     def _settlement(self, event):
-        old_margin = self.margin
-        old_holding_pnl = self.holding_pnl
+        total_value = self.total_value
+
         for position in list(self._positions.values()):
             order_book_id = position.order_book_id
             if position.is_de_listed() and position.buy_quantity + position.sell_quantity != 0:
@@ -159,25 +238,25 @@ class FutureAccount(BaseAccount):
                 del self._positions[order_book_id]
             else:
                 position.apply_settlement()
-        self._total_cash = self._total_cash + (old_margin - self.margin) + old_holding_pnl
-        self._transaction_cost = 0
+        self._total_cash = total_value - self.margin - self.holding_pnl
 
         # 如果 total_value <= 0 则认为已爆仓，清空仓位，资金归0
-        if self.total_value <= 0:
+        if total_value <= 0 and self.forced_liquidation:
+            if self._positions:
+                user_system_log.warn(_("Trigger Forced Liquidation, current total_value is {}"), total_value)
             self._positions.clear()
             self._total_cash = 0
 
         self._backward_trade_set.clear()
 
+    def _update_last_price(self, event):
+        for position in self._positions.values():
+            position.update_last_price()
+
     def _on_order_pending_new(self, event):
         if self != event.account:
             return
         self._frozen_cash += self._frozen_cash_of_order(event.order)
-
-    def _on_order_creation_reject(self, event):
-        if self != event.account:
-            return
-        self._frozen_cash -= self._frozen_cash_of_order(event.order)
 
     def _on_order_unsolicited_update(self, event):
         if self != event.account:

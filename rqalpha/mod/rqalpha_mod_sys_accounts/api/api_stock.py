@@ -14,31 +14,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-'''
-更多描述请见
-https://www.ricequant.com/api/python/chn
-'''
-
 from decimal import Decimal, getcontext
 
 import six
-import numpy as np
 
-from .api_base import decorate_api_exc, instruments, cal_style
-from ..const import ACCOUNT_TYPE, EXECUTION_PHASE, SIDE, ORDER_TYPE
-from ..environment import Environment
-from ..execution_context import ExecutionContext
-from ..model.instrument import Instrument
-from ..model.order import Order, OrderStyle, MarketOrder, LimitOrder
-from ..utils.arg_checker import apply_rules, verify_that
+from rqalpha.api.api_base import decorate_api_exc, instruments, cal_style, register_api
+from rqalpha.const import DEFAULT_ACCOUNT_TYPE, EXECUTION_PHASE, SIDE, ORDER_TYPE, POSITION_EFFECT
+from rqalpha.environment import Environment
+from rqalpha.execution_context import ExecutionContext
+from rqalpha.model.instrument import Instrument
+from rqalpha.model.order import Order, MarketOrder, LimitOrder
+from rqalpha.utils import is_valid_price
+from rqalpha.utils.arg_checker import apply_rules, verify_that
 # noinspection PyUnresolvedReferences
-from ..utils.exception import patch_user_exc, RQInvalidArgument
-from ..utils.i18n import gettext as _
-from ..utils.logger import user_system_log
+from rqalpha.utils.exception import patch_user_exc, RQInvalidArgument
+from rqalpha.utils.i18n import gettext as _
+from rqalpha.utils.logger import user_system_log
 # noinspection PyUnresolvedReferences
-from ..utils.scheduler import market_close, market_open
+from rqalpha.utils.scheduler import market_close, market_open
 # noinspection PyUnresolvedReferences
-from ..utils import scheduler
+from rqalpha.utils import scheduler
 
 # 使用Decimal 解决浮点数运算精度问题
 getcontext().prec = 10
@@ -48,6 +43,9 @@ __all__ = [
     'market_close',
     'scheduler',
 ]
+
+
+register_api("scheduler", scheduler)
 
 
 def export_as_api(func):
@@ -61,7 +59,8 @@ def export_as_api(func):
 @export_as_api
 @ExecutionContext.enforce_phase(EXECUTION_PHASE.ON_BAR,
                                 EXECUTION_PHASE.ON_TICK,
-                                EXECUTION_PHASE.SCHEDULED)
+                                EXECUTION_PHASE.SCHEDULED,
+                                EXECUTION_PHASE.GLOBAL)
 @apply_rules(verify_that('id_or_ins').is_valid_stock(),
              verify_that('amount').is_number(),
              verify_that('style').is_instance_of((MarketOrder, LimitOrder, type(None))))
@@ -79,7 +78,7 @@ def order_shares(id_or_ins, amount, price=None, style=None):
     :param style: 下单类型, 默认是市价单。目前支持的订单类型有 :class:`~LimitOrder` 和 :class:`~MarketOrder`
     :type style: `OrderStyle` object
 
-    :return: :class:`~Order` object
+    :return: :class:`~Order` object | None
 
     :example:
 
@@ -94,6 +93,7 @@ def order_shares(id_or_ins, amount, price=None, style=None):
     """
     if amount == 0:
         # 如果下单量为0，则认为其并没有发单，则直接返回None
+        user_system_log.warn(_(u"Order Creation Failed: Order amount is 0."))
         return None
     style = cal_style(price, style)
     if isinstance(style, LimitOrder):
@@ -103,58 +103,61 @@ def order_shares(id_or_ins, amount, price=None, style=None):
     env = Environment.get_instance()
 
     price = env.get_last_price(order_book_id)
-    if np.isnan(price):
+    if not is_valid_price(price):
         user_system_log.warn(
             _(u"Order Creation Failed: [{order_book_id}] No market data").format(order_book_id=order_book_id))
         return
 
     if amount > 0:
         side = SIDE.BUY
+        position_effect = POSITION_EFFECT.OPEN
     else:
         amount = abs(amount)
         side = SIDE.SELL
+        position_effect = POSITION_EFFECT.CLOSE
 
     round_lot = int(env.get_instrument(order_book_id).round_lot)
 
-    try:
-        amount = int(Decimal(amount) / Decimal(round_lot)) * round_lot
-    except ValueError:
-        amount = 0
+    if side == SIDE.BUY or amount != env.portfolio.accounts[
+        DEFAULT_ACCOUNT_TYPE.STOCK.name
+    ].positions[order_book_id].sellable:
+        # 一次性申报卖出时可以卖散股
+        try:
+            amount = int(Decimal(amount) / Decimal(round_lot)) * round_lot
+        except ValueError:
+            amount = 0
 
-    r_order = Order.__from_create__(order_book_id, amount, side, style, None)
-
-    if price == 0:
-        user_system_log.warn(
-            _(u"Order Creation Failed: [{order_book_id}] No market data").format(order_book_id=order_book_id))
-        r_order.mark_rejected(
-            _(u"Order Creation Failed: [{order_book_id}] No market data").format(order_book_id=order_book_id))
-        return r_order
+    r_order = Order.__from_create__(order_book_id, amount, side, style, position_effect)
 
     if amount == 0:
         # 如果计算出来的下单量为0, 则不生成Order, 直接返回None
         # 因为很多策略会直接在handle_bar里面执行order_target_percent之类的函数，经常会出现下一个量为0的订单，如果这些订单都生成是没有意义的。
-        r_order.mark_rejected(_(u"Order Creation Failed: 0 order quantity"))
-        return r_order
+        user_system_log.warn(_(u"Order Creation Failed: 0 order quantity"))
+        return
     if r_order.type == ORDER_TYPE.MARKET:
         r_order.set_frozen_price(price)
     if env.can_submit_order(r_order):
         env.broker.submit_order(r_order)
-
-    return r_order
+        return r_order
 
 
 def _sell_all_stock(order_book_id, amount, style):
     env = Environment.get_instance()
-    order = Order.__from_create__(order_book_id, amount, SIDE.SELL, style, None)
+    order = Order.__from_create__(order_book_id, amount, SIDE.SELL, style, POSITION_EFFECT.CLOSE)
+    if amount == 0:
+        user_system_log.warn(_(u"Order Creation Failed: 0 order quantity"))
+        return
+
     if env.can_submit_order(order):
         env.broker.submit_order(order)
-    return order
+        return order
 
 
 @export_as_api
 @ExecutionContext.enforce_phase(EXECUTION_PHASE.ON_BAR,
                                 EXECUTION_PHASE.ON_TICK,
-                                EXECUTION_PHASE.SCHEDULED)
+                                EXECUTION_PHASE.SCHEDULED,
+                                EXECUTION_PHASE.GLOBAL)
 @apply_rules(verify_that('id_or_ins').is_valid_stock(),
              verify_that('amount').is_number(),
              verify_that('style').is_instance_of((MarketOrder, LimitOrder, type(None))))
@@ -172,7 +175,7 @@ def order_lots(id_or_ins, amount, price=None, style=None):
     :param style: 下单类型, 默认是市价单。目前支持的订单类型有 :class:`~LimitOrder` 和 :class:`~MarketOrder`
     :type style: `OrderStyle` object
 
-    :return: :class:`~Order` object
+    :return: :class:`~Order` object | None
 
     :example:
 
@@ -190,13 +193,14 @@ def order_lots(id_or_ins, amount, price=None, style=None):
 
     style = cal_style(price, style)
 
-    return order_shares(id_or_ins, amount * round_lot, style)
+    return order_shares(id_or_ins, amount * round_lot, style=style)
 
 
 @export_as_api
 @ExecutionContext.enforce_phase(EXECUTION_PHASE.ON_BAR,
                                 EXECUTION_PHASE.ON_TICK,
-                                EXECUTION_PHASE.SCHEDULED)
+                                EXECUTION_PHASE.SCHEDULED,
+                                EXECUTION_PHASE.GLOBAL)
 @apply_rules(verify_that('id_or_ins').is_valid_stock(),
              verify_that('cash_amount').is_number(),
              verify_that('style').is_instance_of((MarketOrder, LimitOrder, type(None))))
@@ -214,7 +218,7 @@ def order_value(id_or_ins, cash_amount, price=None, style=None):
     :param style: 下单类型, 默认是市价单。目前支持的订单类型有 :class:`~LimitOrder` 和 :class:`~MarketOrder`
     :type style: `OrderStyle` object
 
-    :return: :class:`~Order` object
+    :return: :class:`~Order` object | None
 
     :example:
 
@@ -237,24 +241,20 @@ def order_value(id_or_ins, cash_amount, price=None, style=None):
     env = Environment.get_instance()
 
     price = env.get_last_price(order_book_id)
-    if np.isnan(price):
+    if not is_valid_price(price):
         user_system_log.warn(
             _(u"Order Creation Failed: [{order_book_id}] No market data").format(order_book_id=order_book_id))
         return
 
-    if price == 0:
-        return order_shares(order_book_id, 0, style)
-
-    account = env.portfolio.accounts[ACCOUNT_TYPE.STOCK]
-    round_lot = int(env.get_instrument(order_book_id).round_lot)
+    account = env.portfolio.accounts[DEFAULT_ACCOUNT_TYPE.STOCK.name]
 
     if cash_amount > 0:
         cash_amount = min(cash_amount, account.cash)
 
     if isinstance(style, MarketOrder):
-        amount = int(Decimal(cash_amount) / Decimal(price) / Decimal(round_lot)) * round_lot
+        amount = int(Decimal(cash_amount) / Decimal(price))
     else:
-        amount = int(Decimal(cash_amount) / Decimal(style.get_limit_price()) / Decimal(round_lot)) * round_lot
+        amount = int(Decimal(cash_amount) / Decimal(style.get_limit_price()))
 
     # if the cash_amount is larger than you current security’s position,
     # then it will sell all shares of this security.
@@ -262,13 +262,14 @@ def order_value(id_or_ins, cash_amount, price=None, style=None):
     position = account.positions[order_book_id]
     amount = downsize_amount(amount, position)
 
-    return order_shares(order_book_id, amount, style)
+    return order_shares(order_book_id, amount, style=style)
 
 
 @export_as_api
 @ExecutionContext.enforce_phase(EXECUTION_PHASE.ON_BAR,
                                 EXECUTION_PHASE.ON_TICK,
-                                EXECUTION_PHASE.SCHEDULED)
+                                EXECUTION_PHASE.SCHEDULED,
+                                EXECUTION_PHASE.GLOBAL)
 @apply_rules(verify_that('id_or_ins').is_valid_stock(),
              verify_that('percent').is_number().is_greater_or_equal_than(-1).is_less_or_equal_than(1),
              verify_that('style').is_instance_of((MarketOrder, LimitOrder, type(None))))
@@ -286,7 +287,7 @@ def order_percent(id_or_ins, percent, price=None, style=None):
     :param style: 下单类型, 默认是市价单。目前支持的订单类型有 :class:`~LimitOrder` 和 :class:`~MarketOrder`
     :type style: `OrderStyle` object
 
-    :return: :class:`~Order` object
+    :return: :class:`~Order` object | None
 
     :example:
 
@@ -299,14 +300,15 @@ def order_percent(id_or_ins, percent, price=None, style=None):
         raise RQInvalidArgument(_(u"percent should between -1 and 1"))
 
     style = cal_style(price, style)
-    account = Environment.get_instance().portfolio.accounts[ACCOUNT_TYPE.STOCK]
-    return order_value(id_or_ins, account.total_value * percent, style)
+    account = Environment.get_instance().portfolio.accounts[DEFAULT_ACCOUNT_TYPE.STOCK.name]
+    return order_value(id_or_ins, account.total_value * percent, style=style)
 
 
 @export_as_api
 @ExecutionContext.enforce_phase(EXECUTION_PHASE.ON_BAR,
                                 EXECUTION_PHASE.ON_TICK,
-                                EXECUTION_PHASE.SCHEDULED)
+                                EXECUTION_PHASE.SCHEDULED,
+                                EXECUTION_PHASE.GLOBAL)
 @apply_rules(verify_that('id_or_ins').is_valid_stock(),
              verify_that('cash_amount').is_number(),
              verify_that('style').is_instance_of((MarketOrder, LimitOrder, type(None))))
@@ -324,7 +326,7 @@ def order_target_value(id_or_ins, cash_amount, price=None, style=None):
     :param style: 下单类型, 默认是市价单。目前支持的订单类型有 :class:`~LimitOrder` 和 :class:`~MarketOrder`
     :type style: `OrderStyle` object
 
-    :return: :class:`~Order` object
+    :return: :class:`~Order` object | None
 
     :example:
 
@@ -334,20 +336,21 @@ def order_target_value(id_or_ins, cash_amount, price=None, style=None):
         order_target_value('000001.XSHE', 10000)
     """
     order_book_id = assure_stock_order_book_id(id_or_ins)
-    account = Environment.get_instance().portfolio.accounts[ACCOUNT_TYPE.STOCK]
+    account = Environment.get_instance().portfolio.accounts[DEFAULT_ACCOUNT_TYPE.STOCK.name]
     position = account.positions[order_book_id]
 
     style = cal_style(price, style)
     if cash_amount == 0:
-        return _sell_all_stock(order_book_id, position.quantity, style)
+        return _sell_all_stock(order_book_id, position.sellable, style)
 
-    return order_value(order_book_id, cash_amount - position.market_value, style)
+    return order_value(order_book_id, cash_amount - position.market_value, style=style)
 
 
 @export_as_api
 @ExecutionContext.enforce_phase(EXECUTION_PHASE.ON_BAR,
                                 EXECUTION_PHASE.ON_TICK,
-                                EXECUTION_PHASE.SCHEDULED)
+                                EXECUTION_PHASE.SCHEDULED,
+                                EXECUTION_PHASE.GLOBAL)
 @apply_rules(verify_that('id_or_ins').is_valid_stock(),
              verify_that('percent').is_number().is_greater_or_equal_than(0).is_less_or_equal_than(1),
              verify_that('style').is_instance_of((MarketOrder, LimitOrder, type(None))))
@@ -376,7 +379,7 @@ def order_target_percent(id_or_ins, percent, price=None, style=None):
     :param style: 下单类型, 默认是市价单。目前支持的订单类型有 :class:`~LimitOrder` 和 :class:`~MarketOrder`
     :type style: `OrderStyle` object
 
-    :return: :class:`~Order` object
+    :return: :class:`~Order` object | None
 
     :example:
 
@@ -391,13 +394,13 @@ def order_target_percent(id_or_ins, percent, price=None, style=None):
 
     style = cal_style(price, style)
 
-    account = Environment.get_instance().portfolio.accounts[ACCOUNT_TYPE.STOCK]
+    account = Environment.get_instance().portfolio.accounts[DEFAULT_ACCOUNT_TYPE.STOCK.name]
     position = account.positions[order_book_id]
 
     if percent == 0:
-        return _sell_all_stock(order_book_id, position.quantity, style)
+        return _sell_all_stock(order_book_id, position.sellable, style)
 
-    return order_value(order_book_id, account.total_value * percent - position.market_value, style)
+    return order_value(order_book_id, account.total_value * percent - position.market_value, style=style)
 
 
 @export_as_api
@@ -451,17 +454,7 @@ def is_st_stock(order_book_id, count=1):
 
 def assure_stock_order_book_id(id_or_symbols):
     if isinstance(id_or_symbols, Instrument):
-        order_book_id = id_or_symbols.order_book_id
-        """
-        这所以使用XSHG和XSHE来判断是否可交易是因为股票类型策略支持很多种交易类型，比如CS, ETF, LOF, FenjiMU, FenjiA, FenjiB,
-        INDX等，但实际其中部分由不能交易，所以不能直接按照类型区分该合约是否可以交易。而直接通过判断其后缀可以比较好的区分是否可以进行交易
-        """
-        if "XSHG" in order_book_id or "XSHE" in order_book_id:
-            return order_book_id
-        else:
-            raise RQInvalidArgument(
-                _(u"{order_book_id} is not supported in current strategy type").format(
-                    order_book_id=order_book_id))
+        return id_or_symbols.order_book_id
     elif isinstance(id_or_symbols, six.string_types):
         return assure_stock_order_book_id(instruments(id_or_symbols))
     else:

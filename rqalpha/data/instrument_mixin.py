@@ -14,7 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import pandas as pd
 import six
 
 
@@ -24,11 +23,15 @@ class InstrumentMixin(object):
         self._sym_id_map = {i.symbol: k for k, i in six.iteritems(self._instruments)
                             # 过滤掉 CSI300, SSE50, CSI500, SSE180
                             if not i.order_book_id.endswith('INDX')}
-        # 沪深300 中证500 固定使用上证的
-        for o in ['000300.XSHG', '000905.XSHG']:
-            self._sym_id_map[self._instruments[o].symbol] = o
-        # 上证180 及 上证180指数 两个symbol都指向 000010.XSHG
-        self._sym_id_map[self._instruments['SSE180.INDX'].symbol] = '000010.XSHG'
+        try:
+            # FIXME
+            # 沪深300 中证500 固定使用上证的
+            for o in ['000300.XSHG', '000905.XSHG']:
+                self._sym_id_map[self._instruments[o].symbol] = o
+            # 上证180 及 上证180指数 两个symbol都指向 000010.XSHG
+            self._sym_id_map[self._instruments['SSE180.INDX'].symbol] = '000010.XSHG'
+        except KeyError:
+            pass
 
     def sector(self, code):
         return [v.order_book_id for v in self._instruments.values()
@@ -37,10 +40,6 @@ class InstrumentMixin(object):
     def industry(self, code):
         return [v.order_book_id for v in self._instruments.values()
                 if v.type == 'CS' and v.industry_code == code]
-
-    def concept(self, *concepts):
-        return [v.order_book_id for v in self._instruments.values()
-                if v.type == 'CS' and any(c in v.concept_names.split('|') for c in concepts)]
 
     def all_instruments(self, types, dt=None):
         return [i for i in self._instruments.values()
